@@ -1,0 +1,161 @@
+Bootstrap: docker
+From: rockylinux:9
+
+%labels
+    Author "Krishna"
+    Description "OpenMPI 5.0.5 + UCX + Libfabric + PMIx + OSU + Arbor on Rocky 9"
+
+%files
+    # Pre-download these files to the build directory (where this def file is located) before building:
+    #   wget https://github.com/openpmix/openpmix/releases/download/v5.0.3/pmix-5.0.3.tar.gz
+    #   wget --no-check-certificate https://github.com/openucx/ucx/releases/download/v1.19.0/ucx-1.19.0.tar.gz
+    #   wget https://github.com/ofiwg/libfabric/releases/download/v1.21.1/libfabric-1.21.1.tar.bz2
+    #   wget https://download.open-mpi.org/release/open-mpi/v5.0/openmpi-5.0.5.tar.gz
+    #   wget http://mvapich.cse.ohio-state.edu/download/mvapich/osu-micro-benchmarks-7.5.tar.gz
+    #   git clone https://github.com/arbor-sim/arbor.git arbor-src --recurse-submodules  # Clone to 'arbor-src' directory
+    pmix-5.0.3.tar.gz /opt/src/
+    ucx-1.19.0.tar.gz /opt/src/
+    libfabric-1.21.1.tar.bz2 /opt/src/
+    openmpi-5.0.5.tar.gz /opt/src/
+    osu-micro-benchmarks-7.5.tar.gz /opt/src/
+    arbor-src /opt/src/
+
+%post
+    echo "=== Updating base system ==="
+    dnf -y update --allowerasing
+    dnf -y install epel-release --allowerasing
+    dnf -y groupinstall "Development Tools" --allowerasing
+
+    echo "=== Updating base system ==="
+    dnf -y update --allowerasing
+    dnf -y install epel-release --allowerasing
+
+    echo "=== Installing development tools ==="
+    dnf -y groupinstall "Development Tools" --allowerasing
+
+    echo "=== Installing dependencies ==="
+    dnf -y install --allowerasing \
+        wget curl git \
+        numactl numactl-devel \
+        libibverbs libibverbs-devel rdma-core-devel \
+        libevent libevent-devel \
+        hwloc hwloc-devel \
+        zlib zlib-devel \
+        openssh openssh-clients \
+        python3 \
+        which \
+        autoconf automake libtool \
+        make cmake \
+        gcc-toolset-13
+
+    echo "=== Activating GCC 13 Environment ==="
+    source /opt/rh/gcc-toolset-13/enable
+
+    gcc --version   # Should now show GCC 13
+    g++ --version
+
+    mkdir -p /opt/src
+    cd /opt/src
+
+
+    #####################################################################
+    # Build PMIx (Slurm PMIx cannot be used inside container)
+    #####################################################################
+    echo "=== Building PMIx 5.0.3 ==="
+    tar -xvf pmix-5.0.3.tar.gz
+    cd pmix-5.0.3
+    ./configure --prefix=/opt/pmix
+    make -j$(nproc)
+    make install
+    export PMIX_PATH=/opt/pmix
+    cd /opt/src
+
+    #####################################################################
+    # Build UCX
+    #####################################################################
+    echo "=== Building UCX 1.19.0 ==="
+    tar -xvf ucx-1.19.0.tar.gz
+    cd ucx-1.19.0
+    ./configure --prefix=/opt/ucx --enable-mt --with-verbs --with-rdmacm
+    make -j$(nproc)
+    make install
+    export UCX_PATH=/opt/ucx
+    cd /opt/src
+
+    #####################################################################
+    # Build Libfabric (verbs + rxm + tcp + udp)
+    #####################################################################
+    echo "=== Building Libfabric 1.21.1 ==="
+    tar -xvf libfabric-1.21.1.tar.bz2
+    cd libfabric-1.21.1/
+    ./configure --prefix=/opt/libfabric --enable-verbs=yes --enable-tcp=yes --enable-udp=yes
+    make -j$(nproc)
+    make install
+    export LIBFABRIC_PATH=/opt/libfabric
+    cd /opt/src
+
+    #####################################################################
+    # Build OpenMPI 5.0.5 (with UCX + OFI + PMIx)
+    #####################################################################
+    echo "=== Building OpenMPI 5.0.5 ==="
+    tar -xvf openmpi-5.0.5.tar.gz
+    cd openmpi-5.0.5
+    ./configure \
+        --prefix=/opt/openmpi \
+        --with-pmix=$PMIX_PATH \
+        --with-libevent=/usr \
+        --with-hwloc=/usr \
+        --with-ucx=$UCX_PATH \
+        --with-ofi=$LIBFABRIC_PATH
+    make -j$(nproc)
+    make install
+    export MPI_PATH=/opt/openmpi
+    cd /opt/src
+
+    #####################################################################
+    # Build OSU Microbenchmarks
+    #####################################################################
+    echo "=== Building OSU Benchmarks ==="
+    tar -xvf osu-micro-benchmarks-7.5.tar.gz
+    cd osu-micro-benchmarks-7.5
+    export PATH=$MPI_PATH/bin:$PATH
+    export LD_LIBRARY_PATH=$MPI_PATH/lib:$UCX_PATH/lib:$LIBFABRIC_PATH/lib:$PMIX_PATH/lib:$LD_LIBRARY_PATH
+    CC=mpicc CXX=mpicxx ./configure --prefix=/opt/osu
+    make -j$(nproc)
+    make install
+    cd /opt/src
+
+    #####################################################################
+    # Build Arbor
+    #####################################################################
+    echo "=== Building Arbor ==="
+    cd arbor-src
+    # Submodules already initialized via host clone with --recurse-submodules
+    export PATH=$MPI_PATH/bin:$PATH
+    export LD_LIBRARY_PATH=$MPI_PATH/lib:$UCX_PATH/lib:$LIBFABRIC_PATH/lib:$PMIX_PATH/lib:$LD_LIBRARY_PATH
+    mkdir -p build && cd build  # Fresh start
+    cmake .. \
+      -DCMAKE_C_COMPILER=gcc \
+      -DCMAKE_CXX_COMPILER=g++ \
+      -DARB_WITH_MPI=ON \
+      -DARB_VECTORIZE=ON \
+      -DCMAKE_INSTALL_PREFIX=/opt/arbor
+    make -j$(nproc) VERBOSE=1
+    make install
+    make -j$(nproc) examples
+
+
+%environment
+    export PMIX_PATH=/opt/pmix
+    export UCX_PATH=/opt/ucx
+    export LIBFABRIC_PATH=/opt/libfabric
+    export MPI_PATH=/opt/openmpi
+    export OSU_PATH=/opt/osu
+    export ARBOR_PATH=/opt/arbor
+    export PATH=$MPI_PATH/bin:$OSU_PATH/bin:$ARBOR_PATH/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:$MPI_PATH/lib:$UCX_PATH/lib:$LIBFABRIC_PATH/lib:$PMIX_PATH/lib:/usr/lib64:$LD_LIBRARY_PATH
+
+%runscript
+    echo "Container ready. Use srun SLURM + PMIx outside."
+    exec "$@"
+
