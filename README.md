@@ -7,7 +7,22 @@ export APPTAINER_CACHEDIR=/p/scratch/<>
 export APPTAINER_TMPDIR=/p/scratch/<>
 ```
 
-Basic Apptainer command 
+# Basic Apptainer command 
+**To build the container**
+
+```
+apptianer build --fakeroot arborcuda.sif arborcuda.def
+```
+**To exec the container**
+```
+srun -A <> --nodes=<> --gpus-per-node=<> --partition=<> --output=out_%j.out --error=err_%j.err --nv apptainer exec arborcuda.sif mycode
+```
+or 
+ 
+```
+srun -A <> --nodes=<> --gpus-per-node=<> --partition=<> --output=out_%j.out --error=err_%j.err --nv apptainer exec arborcuda.sif bash
+```
+
 
 
 Running a shell inside apptainer 
