@@ -1,0 +1,165 @@
+Bootstrap: docker
+From: rockylinux/rockylinux:10
+
+%labels
+    Author "Krishna"
+    Description "OpenMPI 5.0.5 + CUDA 13.1 + UCX + Libfabric + PMIx + OSU + Arbor"
+
+%files
+    pmix-5.0.3.tar.gz /opt/src/
+    ucx-1.19.0.tar.gz /opt/src/
+    libfabric-1.21.1.tar.bz2 /opt/src/
+    openmpi-5.0.5.tar.gz /opt/src/
+    osu-micro-benchmarks-8.0b2.tar.gz /opt/src/
+    arbor-src /opt/src/
+
+%post
+    echo "=== Updating base system ==="
+    dnf -y update --allowerasing
+    dnf -y install epel-release --allowerasing
+    dnf -y groupinstall "Development Tools" --allowerasing
+
+    echo "=== Installing dependencies ==="
+    dnf -y install --allowerasing \
+        wget curl git numactl numactl-devel \
+        libibverbs libibverbs-devel rdma-core-devel \
+        libevent libevent-devel hwloc hwloc-devel \
+        zlib zlib-devel openssh openssh-clients \
+        python3 which autoconf automake libtool make cmake \
+        gcc gcc-c++ gcc-gfortran
+
+    #####################################################################
+    # Install CUDA 13.1 toolkit
+    #####################################################################
+    echo "=== Installing CUDA 13.1 Toolkit ==="
+    # Use network repo for reliability (avoids potential local RPM URL issues)
+    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel10/x86_64/cuda-rhel10.repo
+    dnf clean all
+    dnf -y install cuda-toolkit-13-1
+
+    mkdir -p /opt/src
+    cd /opt/src
+
+    # Limit the number of NPROCS
+    export NPROC_LIMIT=16
+
+    # Set Internal Build Environment for CUDA 13.1
+    export CUDA_ROOT=/usr/local/cuda-13.1
+    export PATH=${CUDA_ROOT}/bin:$PATH
+    export LD_LIBRARY_PATH=${CUDA_ROOT}/lib64:$LD_LIBRARY_PATH
+    export LDFLAGS="-L${CUDA_ROOT}/lib64/stubs"
+
+    #####################################################################
+    # Build PMIx
+    #####################################################################
+    tar -xvf pmix-5.0.3.tar.gz
+    cd pmix-5.0.3
+    ./configure --prefix=/opt/pmix
+    make -j${NPROC_LIMIT} install
+    export PMIX_PATH=/opt/pmix
+    cd /opt/src
+
+    #####################################################################
+    # Build UCX (with CUDA support)
+    #####################################################################
+    tar -xvf ucx-1.19.0.tar.gz
+    cd ucx-1.19.0
+    ./configure --prefix=/opt/ucx \
+        --enable-mt --with-verbs --with-rdmacm \
+        --with-cuda=${CUDA_ROOT}
+    make -j${NPROC_LIMIT} install
+    export UCX_PATH=/opt/ucx
+    cd /opt/src
+
+    #####################################################################
+    # Build Libfabric
+    #####################################################################
+    # tar -xvf libfabric-1.21.1.tar.bz2
+    # cd libfabric-1.21.1/
+    # ./configure --prefix=/opt/libfabric --enable-verbs=yes --enable-tcp=yes --enable-udp=yes
+    # make -j${NPROC_LIMIT} install
+    # export LIBFABRIC_PATH=/opt/libfabric
+    # cd /opt/src
+
+    #####################################################################
+    # Build OpenMPI 5.0.5 (CUDA-Aware)
+    #####################################################################
+    tar -xvf openmpi-5.0.5.tar.gz
+    cd openmpi-5.0.5
+    ./configure \
+        --prefix=/opt/openmpi \
+        --with-pmix=${PMIX_PATH} \
+        --with-ucx=${UCX_PATH} \
+        --with-cuda=${CUDA_ROOT} \
+        --with-cuda-libdir=${CUDA_ROOT}/lib64/stubs \
+        # --with-ofi=${LIBFABRIC_PATH}  # Add this later for libfabric
+    make -j${NPROC_LIMIT} install
+    export MPI_PATH=/opt/openmpi
+    cd /opt/src
+
+#    #####################################################################
+#    # Build OSU Microbenchmarks (with CUDA 13.1 compatibility patch)
+#    #####################################################################
+#    tar -xvf osu-micro-benchmarks-8.0b2.tar.gz
+#    cd osu-micro-benchmarks-8.0b2
+#    export PATH=${MPI_PATH}/bin:$PATH
+#    export CUDA_HOME=${CUDA_ROOT}
+#    # Patch for CUDA 12+ / 13.1 API change in cudaMemPrefetchAsync (old 4-arg to new 5-arg with cudaMemLocation)
+#    sed -i "s/CUDA_CHECK(cudaMemPrefetchAsync(buf, length, devid, um_stream));/struct cudaMemLocation loc = make_cudaMemLocation(cudaMemLocationTypeDev, devid); CUDA_CHECK(cudaMemPrefetchAsync(buf, length, loc, 0, um_stream));/" c/util/osu_util_mpi.c
+#    ./configure --prefix=/opt/osu \
+#        CC=mpicc CXX=mpicxx \
+#        --enable-cuda --with-cuda=${CUDA_ROOT} \
+#        LDFLAGS="-L${CUDA_ROOT}/lib64/stubs"
+#    make -j${NPROC_LIMIT} install
+#    cd /opt/src
+
+    #####################################################################
+    # Build Arbor
+    #####################################################################
+    cd arbor-src
+    mkdir build && cd build
+    export CUDA_HOME=${CUDA_ROOT}
+    export PATH=$MPI_PATH/bin:$PATH
+    export LD_LIBRARY_PATH=$MPI_PATH/lib:$UCX_PATH/lib:$PMIX_PATH/lib:$LD_LIBRARY_PATH
+    export CC=${MPI_PATH}/bin/mpicc
+    export CXX=${MPI_PATH}/bin/mpicxx
+    cmake .. \
+      -DARB_GPU=cuda \
+      -DCMAKE_CUDA_ARCHITECTURES=80 \
+      -DARB_ARCH=native \
+      -DARB_WITH_MPI=ON \
+      -DARB_VECTORIZE=ON \
+      -DCMAKE_INSTALL_PREFIX=/opt/installarbor 
+ #     -DCMAKE_CUDA_ARCHITECTURES=all-major \
+ #     -DCMAKE_CUDA_COMPILER=${CUDA_ROOT}/bin/nvcc \
+ #     -DCMAKE_CXX_STANDARD=20
+    make -j${NPROC_LIMIT} install
+    make -j${NPROC_LIMIT} examples
+    cd /opt/src
+
+%environment
+    export CUDA_ROOT=/usr/local/cuda-13.1
+    export PMIX_PATH=/opt/pmix
+    export UCX_PATH=/opt/ucx
+    # export LIBFABRIC_PATH=/opt/libfabric
+    export MPI_PATH=/opt/openmpi
+#    export OSU_PATH=/opt/osu
+    export ARBOR_PATH=/opt/installarbor
+    
+    export PATH=${CUDA_ROOT}/bin:$PATH
+    export PATH=${MPI_PATH}/bin:$PATH
+    #export PATH=${OSU_PATH}/bin:$PATH
+    export PATH={ARBOR_PATH}/bin:$PATH
+    
+    #LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${CUDA_ROOT}/lib64:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${MPI_PATH}/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${UCX_PATH}/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${PMIX_PATH}/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${ARBOR_PATH}/lib:$LD_LIBRARY_PATH
+
+	# export LD_LIBRARY_PATH=...:${LIBFABRIC_PATH}/lib:...  # Add when libfabric is enabled
+
+%runscript
+    echo "Container built with CUDA 13.1 and Rocky Linux 10 (GCC 14+ for C++20). Use 'apptainer run --nv' for execution."
+    exec "$@"
