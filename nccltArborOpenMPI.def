@@ -1,0 +1,159 @@
+Bootstrap: docker
+From: rockylinux/rockylinux:10
+
+%labels
+    Author "Krishna"
+    Description "OpenMPI 5.0.5 + CUDA 13.1 + NCCL + nccl-tests + UCX + Libfabric + PMIx + OSU + Arbor"
+
+%files
+    pmix-5.0.3.tar.gz /opt/src/
+    ucx-1.19.0.tar.gz /opt/src/
+    libfabric-1.21.1.tar.bz2 /opt/src/
+    openmpi-5.0.5.tar.gz /opt/src/
+    osu-micro-benchmarks-8.0b2.tar.gz /opt/src/
+    arbor-src /opt/src/
+
+%post
+    echo "=== 1. Fixing Rocky Linux 10 Repositories ==="
+    # This switches from mirrorlist to baseurl to fix the "No URLs in mirrorlist" error
+    sed -i 's/^mirrorlist/#mirrorlist/g' /etc/yum.repos.d/rocky*.repo
+    sed -i 's/^#baseurl/baseurl/g' /etc/yum.repos.d/rocky*.repo
+
+    echo "=== Updating base system ==="
+    dnf -y update --allowerasing
+    dnf -y install epel-release --allowerasing
+    dnf config-manager --set-enabled crb
+    dnf -y groupinstall "Development Tools" --allowerasing
+
+    echo "=== Installing dependencies ==="
+    dnf -y install --allowerasing \
+        wget curl git numactl numactl-devel \
+        libibverbs libibverbs-devel rdma-core-devel \
+        libevent libevent-devel hwloc hwloc-devel \
+        zlib zlib-devel openssh openssh-clients \
+        python3 which autoconf automake libtool make cmake \
+        gcc gcc-c++ gcc-gfortran \
+	munge munge-devel munge-libs
+
+    #####################################################################
+    # Install CUDA 13.1 toolkit & NCCL
+    #####################################################################
+    echo "=== Installing CUDA 13.1 Toolkit and NCCL ==="
+    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel10/x86_64/cuda-rhel10.repo 
+    dnf clean all
+    # Added libnccl and libnccl-devel here
+    dnf -y install cuda-toolkit-13-1 libnccl libnccl-devel
+
+    mkdir -p /opt/src
+    cd /opt/src
+
+    # Limit the number of NPROCS
+    export NPROC_LIMIT=16
+
+    # Set Internal Build Environment for CUDA 13.1
+    export CUDA_ROOT=/usr/local/cuda-13.1
+    export PATH=${CUDA_ROOT}/bin:$PATH
+    export LD_LIBRARY_PATH=${CUDA_ROOT}/lib64:$LD_LIBRARY_PATH
+    export LDFLAGS="-L${CUDA_ROOT}/lib64/stubs"
+
+    #####################################################################
+    # Build PMIx
+    #####################################################################
+    tar -xvf pmix-5.0.3.tar.gz
+    cd pmix-5.0.3
+    ./configure --prefix=/opt/pmix
+    make -j${NPROC_LIMIT} install
+    export PMIX_PATH=/opt/pmix
+    cd /opt/src
+
+    #####################################################################
+    # Build UCX (with CUDA support)
+    #####################################################################
+    tar -xvf ucx-1.19.0.tar.gz
+    cd ucx-1.19.0
+    ./configure --prefix=/opt/ucx \
+        --enable-mt --with-verbs --with-rdmacm \
+        --with-cuda=${CUDA_ROOT}
+    make -j${NPROC_LIMIT} install
+    export UCX_PATH=/opt/ucx
+    cd /opt/src
+
+    #####################################################################
+    # Build OpenMPI 5.0.5 (CUDA-Aware)
+    #####################################################################
+    tar -xvf openmpi-5.0.5.tar.gz
+    cd openmpi-5.0.5
+    ./configure \
+        --prefix=/opt/openmpi \
+        --with-pmix=${PMIX_PATH} \
+        --with-ucx=${UCX_PATH} \
+        --with-cuda=${CUDA_ROOT} \
+        --with-cuda-libdir=${CUDA_ROOT}/lib64/stubs 
+    make -j${NPROC_LIMIT} install
+    export MPI_PATH=/opt/openmpi
+    cd /opt/src
+
+    #####################################################################
+    # Build NCCL-Tests
+    #####################################################################
+    echo "=== Building NCCL-Tests ==="
+    git clone https://github.com/NVIDIA/nccl-tests.git
+    cd nccl-tests
+    # MPI=1 enables multi-node testing using your built OpenMPI
+    make -j${NPROC_LIMIT} \
+        MPI=1 \
+        MPI_HOME=${MPI_PATH} \
+        CUDA_HOME=${CUDA_ROOT} \
+        NCCL_HOME=/usr
+    
+    mkdir -p /opt/nccl-tests
+    cp -r build/ /opt/nccl-tests/
+    export NCCL_TESTS_PATH=/opt/nccl-tests/build
+    cd /opt/src
+
+    #####################################################################
+    # Build Arbor
+    #####################################################################
+    cd arbor-src
+    mkdir build && cd build
+    export CUDA_HOME=${CUDA_ROOT}
+    export PATH=$MPI_PATH/bin:$PATH
+    export LD_LIBRARY_PATH=$MPI_PATH/lib:$UCX_PATH/lib:$PMIX_PATH/lib:$LD_LIBRARY_PATH
+    export CC=${MPI_PATH}/bin/mpicc
+    export CXX=${MPI_PATH}/bin/mpicxx
+    cmake .. \
+      -DARB_GPU=cuda \
+      -DCMAKE_CUDA_ARCHITECTURES=80 \
+      -DARB_WITH_MPI=ON \
+      -DARB_VECTORIZE=ON \
+      -DCMAKE_INSTALL_PREFIX=/opt/installarbor 
+    make -j${NPROC_LIMIT} install
+    make -j${NPROC_LIMIT} examples
+    cd /opt/src
+
+%environment
+    export CUDA_ROOT=/usr/local/cuda-13.1
+    export PMIX_PATH=/opt/pmix
+    export UCX_PATH=/opt/ucx
+    export MPI_PATH=/opt/openmpi
+    export ARBOR_PATH=/opt/installarbor
+    export NCCL_TESTS_PATH=/opt/nccl-tests/build
+    
+    export PATH=${CUDA_ROOT}/bin:$PATH
+    export PATH=${MPI_PATH}/bin:$PATH
+    export PATH=${ARBOR_PATH}/bin:$PATH
+    export PATH=${NCCL_TESTS_PATH}:$PATH
+    
+    # LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${CUDA_ROOT}/lib64:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${MPI_PATH}/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${UCX_PATH}/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${PMIX_PATH}/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=${ARBOR_PATH}/lib:$LD_LIBRARY_PATH
+    # NCCL libs are in /usr/lib64 via dnf, which is usually in default search path, 
+    # but we can be explicit if needed.
+
+%runscript
+    echo "Container built with CUDA 13.1, NCCL, and OpenMPI 5.0.5."
+    echo "NCCL tests are available in the PATH (e.g., all_reduce_perf)."
+    exec "$@"
