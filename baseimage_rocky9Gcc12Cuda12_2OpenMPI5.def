@@ -1,0 +1,281 @@
+Bootstrap: localimage
+From: cuda_12.2.2-devel-rockylinux9.sif
+
+%labels
+    Author "Krishna" Description "OpenMPI 5.0.5 + UCX + Libfabric + PMIx + OSU + Arbor on Rocky 9"
+
+%files
+    # Pre-download these files to the build directory (where this def file is located) before building:
+    #   git clone https://github.com/arbor-sim/arbor.git arbor-src --recurse-submodules  # Clone to 'arbor-src' directory
+   # pmix-5.0.3.tar.gz /opt/src/
+   # ucx-1.19.0.tar.gz /opt/src/
+   # libfabric-1.21.1.tar.bz2 /opt/src/
+   # #openmpi-5.0.5.tar.gz /opt/src/
+   # #osu-micro-benchmarks-8.0b2.tar.gz /opt/src/
+   # #arbor-src /opt/src/
+   ../osu-micro-benchmarks-8.0b2.tar.gz /opt/src/
+   ../arbor-src /opt/src/
+
+%post
+    echo "=== Updating base system ==="
+    dnf -y update --allowerasing
+    dnf -y install epel-release --allowerasing
+    dnf -y groupinstall "Development Tools" --allowerasing
+
+    echo "=== Updating base system ==="
+    dnf -y update --allowerasing
+    dnf -y install epel-release --allowerasing
+    
+    echo "=== Installing development tools ==="
+    dnf -y groupinstall "Development Tools" --allowerasing
+    
+    echo "=== Installing dependencies ==="
+    dnf -y install --allowerasing --best --skip-broken\
+        wget curl git \
+        numactl numactl-devel \
+        libibverbs libibverbs-devel rdma-core-devel \
+        libevent libevent-devel \
+        hwloc hwloc-devel \
+        zlib zlib-devel \
+        openssh openssh-clients \
+        python3 \
+        which \
+        openssl-devel pkgconf-pkg-config \
+        autoconf automake libtool \
+        make cmake \
+        gcc-toolset-12
+    
+    ############ For spack#################
+    dnf install python312 python3.12-pip -y
+ 
+    echo "=== Activating GCC 12 Environment ==="
+    source /opt/rh/gcc-toolset-12/enable
+    
+    gcc --version   # Should now show GCC 12
+    g++ --version
+    mkdir -p /opt/src
+    cd /opt/src
+  
+    ##################################################################
+    # Download and install munge
+    #################################################################
+    git clone https://github.com/dun/munge.git
+    cd munge
+    ./bootstrap
+    ./configure \
+      --prefix=/usr \
+      --sysconfdir=/etc \
+      --localstatedir=/var \
+      --runstatedir=/run
+     make
+     #make check
+     make install
+     cd /opt/src
+     rm -rf munge/
+   
+    ##################################################################
+    # Download files
+    #################################################################
+ 
+    echo "=== Downloading PMIX, UCX OpenMPI-5.05 ==="
+    #Download Pmix
+    wget https://github.com/openpmix/openpmix/releases/download/v5.0.3/pmix-5.0.3.tar.gz
+    #Download UCX
+    wget --no-check-certificate https://github.com/openucx/ucx/releases/download/v1.19.0/ucx-1.19.0.tar.gz
+    # For now, we will not use libfabric 
+    #wget https://github.com/ofiwg/libfabric/releases/download/v1.21.1/libfabric-1.21.1.tar.bz2
+    wget https://download.open-mpi.org/release/open-mpi/v5.0/openmpi-5.0.5.tar.gz
+    #wget http://mvapich.cse.ohio-state.edu/download/mvapich/osu-micro-benchmarks-7.5.tar.gz
+
+
+    #####################################################################
+    # CUDA 12.8 toolkit
+    #####################################################################
+    echo "=== Installing CUDA 12.8 Toolkit ==="
+
+   # wget https://developer.download.nvidia.com/compute/cuda/12.8.0/local_installers/cuda-repo-rhel9-12-8-local-12.8.0_570.86.10-1.x86_64.rpm
+   # rpm -i cuda-repo-rhel9-12-8-local-12.8.0_570.86.10-1.x86_64.rpm
+   # dnf clean all
+   # dnf -y install cuda-toolkit-12-8
+    
+    cd /opt/src
+    export nproc=16
+
+
+    # Set Internal Build Environment for CUDA 12.8
+    export PATH=/usr/local/cuda-12.2/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/cuda-12.2/lib64:$LD_LIBRARY_PATH
+    export CUDA_ROOT=/usr/local/cuda-12.2
+    export LDFLAGS="-L${CUDA_ROOT}/lib64/stubs"
+
+    #####################################################################
+    # Build PMIx (Slurm PMIx cannot be used inside container)
+    #####################################################################
+    echo "=== Building PMIx 5.0.3 ==="
+    tar -xvf pmix-5.0.3.tar.gz
+    cd pmix-5.0.3
+    ./configure --prefix=/opt/pmix --disable-debug 
+    make -j$(nproc)
+    make install
+    export PMIX_PATH=/opt/pmix
+    cd /opt/src
+
+    #####################################################################
+    # Build UCX
+    #####################################################################
+    echo "=== Building UCX 1.19.0 ==="
+    tar -xvf ucx-1.19.0.tar.gz
+    cd ucx-1.19.0
+    ./configure --prefix=/opt/ucx --enable-mt --with-verbs --with-rdmacm --with-cuda=$CUDA_ROOT
+    make -j$(nproc)
+    make install
+    export UCX_PATH=/opt/ucx
+    cd /opt/src
+
+    #####################################################################
+    # Build Libfabric (verbs + rxm + tcp + udp)
+    #####################################################################
+#    echo "=== Building Libfabric 1.21.1 with CUDA support ==="
+#    tar -xvf libfabric-1.21.1.tar.bz2
+#    cd libfabric-1.21.1/
+#    ./configure --prefix=/opt/libfabric \
+#      --enable-verbs=yes \
+#      --enable-tcp=yes \
+#      --enable-udp=yes \
+#      --enable-cuda \
+#      --with-cuda=${CUDA_ROOT}
+#    make -j$(nproc)
+#    make install
+#    export LIBFABRIC_PATH=/opt/libfabric
+#    cd /opt/src
+    #####################################################################
+    # Build OpenMPI 5.0.5 (with UCX + OFI + PMIx)
+    #####################################################################
+    echo "=== Building OpenMPI 5.0.5 ==="
+    tar -xvf openmpi-5.0.5.tar.gz
+    cd openmpi-5.0.5
+    ./configure \
+        --prefix=/opt/openmpi \
+        --with-pmix=$PMIX_PATH \
+        --with-libevent=/usr \
+        --with-hwloc=/usr \
+        --with-ucx=$UCX_PATH \
+        --with-cuda=$CUDA_ROOT \
+        --with-cuda-libdir=$CUDA_ROOT/lib64/stubs \
+        --disable-docs \
+        --disable-man-pages \
+        --disable-debug \
+        --disable-mpi-fortran \
+        --disable-mpi-cxx \
+        --without-tm \
+        --without-lfs \
+        --without-alps \
+        --without-verbs \
+        --without-ofi
+ 
+    make -j$(nproc)
+    make install
+    export MPI_PATH=/opt/openmpi
+    cd /opt/src
+
+
+
+    #####################################################################
+    # Build OSU Microbenchmarks (with CUDA 12.2 compatibility)
+#    #####################################################################
+#    echo "=== Building OSU Benchmarks ==="
+#    tar -xvf osu-micro-benchmarks-8.0b2.tar.gz
+#    cd osu-micro-benchmarks-8.0b2
+#    export PATH=${MPI_PATH}/bin:$PATH
+#    export CUDA_HOME=${CUDA_ROOT}
+#    export LD_LIBRARY_PATH=${MPI_PATH}/lib:${CUDA_ROOT}/lib64/stubs:${CUDA_ROOT}/lib64:$LD_LIBRARY_PATH 
+#    # Patch for CUDA 12+ API change
+#    cat > cuda_api_fix.patch << 'EOF'
+#--- a/c/util/osu_util_mpi.c
+#+++ b/c/util/osu_util_mpi.c
+#@@ -258,7 +258,9 @@ void osu_cuda_mem_prefetch(void *buf, size_t length, int devid, cudaStream_t um_ 
+#             int device;
+#             CUDA_CHECK(cudaGetDevice(&device));
+#         }
+#-        CUDA_CHECK(cudaMemPrefetchAsync(buf, length, devid, um_stream));
+#+        struct cudaMemLocation loc;
+#+        loc.type = cudaMemLocationTypeDevice;
+#+        CUDA_CHECK(cudaMemPrefetchAsync(buf, length, &loc, 1, um_stream));
+#     }   
+# }
+#EOF
+#    patch -p1 < cuda_api_fix.patch || echo "Patch applied (or already applied)"
+#    
+#    ./configure --prefix=/opt/osu \
+#        CC=mpicc \
+#        CXX=mpicxx \
+#        CFLAGS="--allow-unsupported-compiler" \
+#        --enable-cuda --with-cuda=${CUDA_ROOT} 
+#    #    LDFLAGS="-L${CUDA_ROOT}/lib64/stubs"
+#    make -j$nproc install
+#    cd /opt/src
+#
+#
+#    #####################################################################
+    # Build Arbor
+    #####################################################################
+    echo "=== Building Arbor ==="
+    cd /opt/src/arbor-src
+    # Submodules already initialized via host clone with --recurse-submodules
+    export PATH=$MPI_PATH/bin:$PATH
+
+    mkdir -p build && cd build  # Fresh start
+    export CUDA_HOME=${CUDA_ROOT}
+    export PATH=$MPI_PATH/bin:$PATH
+    export LD_LIBRARY_PATH=$MPI_PATH/lib:$UCX_PATH/lib:$PMIX_PATH/lib:$LD_LIBRARY_PATH
+    export CC=${MPI_PATH}/bin/mpicc
+    export CXX=${MPI_PATH}/bin/mpicxx
+#    cmake .. \
+#      -DARB_GPU=cuda \
+#      -DCMAKE_CUDA_ARCHITECTURES="70;80" \
+#      -DARB_ARCH=native \
+#      -DARB_WITH_MPI=ON \
+#      -DARB_VECTORIZE=ON \
+#      -DCMAKE_CUDA_FLAGS="--allow-unsupported-compiler" \
+#      -DCMAKE_INSTALL_PREFIX=/opt/installarbor
+
+    cmake .. \
+      -DARB_GPU=cuda \
+      -DCMAKE_CUDA_ARCHITECTURES="70;80" \
+      -DARB_ARCH=native \
+      -DARB_WITH_MPI=ON \
+      -DARB_VECTORIZE=ON \
+      -DCMAKE_CUDA_FLAGS="--allow-unsupported-compiler" \
+      -DCMAKE_INSTALL_PREFIX=/opt/installarbor
+
+
+    make -j$(nproc) VERBOSE=1
+    make install
+    make -j$(nproc) examples
+    mv bin/* /opt/installarbor/bin/
+
+    ##########
+    # clean up
+    #########
+    rm -f /opt/src/*.tar.gz          
+    rm -f /opt/src/*.tar.bz2         
+    rm -rf /opt/src/libfabric-1.21.1/ 
+    rm -rf /opt/src/openmpi-5.0.5/       
+    rm -rf /opt/src/arbor-src/       
+    rm -rf /opt/src/ucx-1.19.0               
+    rm -rf /opt/src/pmix-5.0.3/
+    #rm -f cuda-repo-*.rpm          
+
+
+%environment
+    export CUDA_ROOT=/usr/local/cuda-12.2
+    export PMIX_PATH=/opt/pmix
+    export UCX_PATH=/opt/ucx
+#    export LIBFABRIC_PATH=/opt/libfabric
+    export MPI_PATH=/opt/openmpi
+    export PATH=$MPI_PATH/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:$MPI_PATH/lib:$UCX_PATH/lib:$PMIX_PATH/lib:/usr/lib64:$LD_LIBRARY_PATH
+
+%runscript
+    echo "Container ready. Use srun SLURM + PMIx outside."
+    exec "$@"
